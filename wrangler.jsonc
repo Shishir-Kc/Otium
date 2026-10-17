@@ -1,38 +1,59 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "otium",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-10-14"
-  // "compatibility_flags": [
-  //   "nodejs_compat"
-  // ],
-  // "vars": {
-  //   "MY_VAR": "my-variable"
-  // },
-  // "kv_namespaces": [
-  //   {
-  //     "binding": "MY_KV_NAMESPACE",
-  //     "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  //   }
-  // ],
-  // "r2_buckets": [
-  //   {
-  //     "binding": "MY_BUCKET",
-  //     "bucket_name": "my-bucket"
-  //   }
-  // ],
-  // "d1_databases": [
-  //   {
-  //     "binding": "MY_DB",
-  //     "database_name": "my-database",
-  //     "database_id": ""
-  //   }
-  // ],
-  // "ai": {
-  //   "binding": "AI"
-  // },
-  // "observability": {
-  //   "enabled": true,
-  //   "head_sampling_rate": 1
-  // }
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "otium",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-14",
+	"vars": {
+		"DOWNLOAD_SERVER_URL": "http://127.0.0.1:3000/download",
+		"FRONTEND_ORIGINS": "https://justmusic.kc-dev-py.workers.dev,https://music-8vu.pages.dev,https://5d832d7f.music-8vu.pages.dev",
+		"B2_REGION": "us-east-005",
+		"B2_BUCKET": "otium.bucket",
+		"B2_ENDPOINT": "https://s3.us-east-005.backblazeb2.com"
+	},
+	"d1_databases": [
+		{
+			"binding": "otium_db",
+			"database_name": "otium-db",
+			"database_id": "fb4f4107-a3e7-4bdf-a79f-88c1d17dac8c",
+			"remote": false
+		}
+	],
+	"observability": {
+		"enabled": true,
+		"logs": { "enabled": true, "head_sampling_rate": 1 },
+		"traces": { "enabled": true, "head_sampling_rate": 0.01 }
+	}
+	// "compatibility_flags": [
+	//   "nodejs_compat"
+	// ],
+	// "vars": {
+	//   "MY_VAR": "my-variable"
+	// },
+	// "kv_namespaces": [
+	//   {
+	//     "binding": "MY_KV_NAMESPACE",
+	//     "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+	//   }
+	// ],
+	// "r2_buckets": [
+	//   {
+	//     "binding": "MY_BUCKET",
+	//     "bucket_name": "my-bucket"
+	//   }
+	// ],
+	// "d1_databases": [
+	//   {
+	//     "binding": "MY_DB",
+	//     "database_name": "my-database",
+	//     "database_id": ""
+	//   }
+	// ],
+	// "ai": {
+	//   "binding": "AI"
+	// },
+	// "observability": {
+	//   "enabled": true,
+	//   "head_sampling_rate": 1
+	// }
+	//
 }
