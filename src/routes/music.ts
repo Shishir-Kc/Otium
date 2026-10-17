@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { AddSongSchema, CreatePlaylistSchema, MusicDownloadSchema, SongSchema } from "../types/index.ts";
 import { b2ConfigFromEnv, deleteObject, signedObjectUrl, uploadObject } from "../services/b2.ts";
+import auth, { requireAdmin, requireLogin, type Account } from "./auth.ts";
+import type { OtiumBindings } from "../types/bindings.ts";
 
 type PlaylistRow = {
   id: string;
@@ -19,7 +21,17 @@ type SongRow = {
   created_at: string;
 };
 
-const music = new Hono<{ Bindings: CloudflareBindings }>();
+type PublicLibraryRow = {
+  id: string;
+  name: string;
+  playlist_image_url: string | null;
+  song_id: string | null;
+  title: string | null;
+  image_url: string | null;
+  audio: string | null;
+};
+
+const music = new Hono<{ Bindings: OtiumBindings; Variables: { account: Account } }>();
 
 function b2Config(env: CloudflareBindings) {
   return b2ConfigFromEnv(env);
@@ -31,7 +43,7 @@ function jsonError(message: string, status: 400 | 404 | 409 | 413 | 415 | 502 | 
 
 function playlistMediaUrl(requestUrl: string, songId: string, kind: "audio" | "cover") {
   const request = new URL(requestUrl);
-  const apiPath = request.pathname.replace(/\/playlists\/[^/]+$/, "");
+  const apiPath = request.pathname.replace(/\/(?:playlists\/[^/]+|library\/metadata)$/, "");
   return `${request.origin}${apiPath}/songs/${encodeURIComponent(songId)}/media/${kind}`;
 }
 
@@ -64,6 +76,45 @@ music.use("*", async (c, next) => {
 });
 
 music.get("/ping", (c) => c.json({ message: "server is alive" }));
+
+music.use("*", requireLogin);
+music.route("/auth", auth);
+
+music.get("/library/metadata", async (c) => {
+  const result = await c.env.otium_db.prepare(`
+    SELECT p.id, p.name, p.playlist_image_url,
+      s.id AS song_id, s.title, s.image_url, s.audio
+    FROM playlist p
+    LEFT JOIN playlist_song ps ON ps.playlist_id = p.id
+    LEFT JOIN song s ON s.id = ps.song_id
+    ORDER BY p.created_at DESC, ps.added_at ASC
+  `).all<PublicLibraryRow>();
+
+  const playlists = new Map<string, {
+    id: string;
+    name: string;
+    playlist_image_url: string | null;
+    songs: Array<{ id: string; title: string; coverUrl: string | null; hasAudio: boolean }>;
+  }>();
+  for (const row of result.results) {
+    let playlist = playlists.get(row.id);
+    if (!playlist) {
+      playlist = { id: row.id, name: row.name, playlist_image_url: row.playlist_image_url, songs: [] };
+      playlists.set(row.id, playlist);
+    }
+    if (row.song_id && row.title) {
+      playlist.songs.push({
+        id: row.song_id,
+        title: row.title,
+        coverUrl: row.image_url ? playlistMediaUrl(c.req.url, row.song_id, "cover") : null,
+        hasAudio: Boolean(row.audio),
+      });
+    }
+  }
+
+  c.header("Cache-Control", "private, max-age=60, stale-while-revalidate=300");
+  return c.json({ playlists: [...playlists.values()] });
+});
 
 music.get("/playlists", async (c) => {
   const result = await c.env.otium_db.prepare(`
@@ -146,7 +197,7 @@ music.get("/songs/:songId/media/:kind", async (c) => {
     if (!headers.has("content-type")) {
       headers.set("content-type", kind === "audio" ? "audio/mpeg" : "image/jpeg");
     }
-    headers.set("cache-control", "private, max-age=300");
+    headers.set("cache-control", kind === "audio" ? "private, no-store, max-age=0" : "private, max-age=86400");
     headers.set("access-control-expose-headers", "Accept-Ranges, Content-Range, ETag");
     return new Response(source.body, { status: source.status, headers });
   } catch (error) {
@@ -155,7 +206,7 @@ music.get("/songs/:songId/media/:kind", async (c) => {
   }
 });
 
-music.delete("/playlists/:playlistId", async (c) => {
+music.delete("/playlists/:playlistId", requireAdmin, async (c) => {
   const { playlistId } = c.req.param();
   const result = await c.env.otium_db.prepare(
     "DELETE FROM playlist WHERE id = ?",
@@ -179,12 +230,41 @@ music.post("/playlists/:playlistId/songs", zValidator("json", AddSongSchema), as
   return c.json({ playlistId, songId, added: true }, 201);
 });
 
-music.delete("/playlists/:playlistId/songs/:songId", async (c) => {
+music.delete("/playlists/:playlistId/songs/:songId", requireAdmin, async (c) => {
   const { playlistId, songId } = c.req.param();
   const result = await c.env.otium_db.prepare(
     "DELETE FROM playlist_song WHERE playlist_id = ? AND song_id = ?",
   ).bind(playlistId, songId).run();
   if (!result.meta.changes) return jsonError("Song is not in this playlist", 404);
+  return c.body(null, 204);
+});
+
+music.delete("/songs/:songId", requireAdmin, async (c) => {
+  const { songId } = c.req.param();
+  const song = await c.env.otium_db.prepare(
+    "SELECT audio, image_url FROM song WHERE id = ?",
+  ).bind(songId).first<{ audio: string | null; image_url: string | null }>();
+  if (!song) return jsonError("Song not found", 404);
+
+  if (song.audio || song.image_url) {
+    try {
+      const config = b2Config(c.env);
+      if (song.audio) await deleteObject(config, song.audio);
+      if (song.image_url) await deleteObject(config, song.image_url);
+    } catch (error) {
+      console.error(JSON.stringify({
+        message: "song media deletion failed",
+        songId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      return jsonError("Could not delete the song media from storage", 502);
+    }
+  }
+
+  const result = await c.env.otium_db.prepare(
+    "DELETE FROM song WHERE id = ?",
+  ).bind(songId).run();
+  if (!result.meta.changes) return jsonError("Song not found", 404);
   return c.body(null, 204);
 });
 
@@ -209,7 +289,7 @@ music.get("/songs/download/:downloadId/progress", async (c) => {
   }
 });
 
-music.post("/songs/download", zValidator("json", MusicDownloadSchema), async (c) => {
+music.post("/songs/download", requireAdmin, zValidator("json", MusicDownloadSchema), async (c) => {
   const { url: sourceUrl, downloadId: requestedDownloadId, playlistId } = c.req.valid("json");
   const downloadId = requestedDownloadId ?? crypto.randomUUID();
   if (playlistId) {
@@ -311,6 +391,7 @@ music.post("/songs/download", zValidator("json", MusicDownloadSchema), async (c)
   return c.json({ id, title: savedMedia.title, sourceUrl }, 201);
 });
 
+// The router-level requireLogin middleware protects this upload for every member.
 music.post("/songs/upload", async (c) => {
   let form: FormData;
   try {
@@ -319,9 +400,17 @@ music.post("/songs/upload", async (c) => {
     return jsonError("Expected multipart form data", 400);
   }
   const title = form.get("title");
-  const sourceUrl = form.get("sourceUrl");
+  const sourceUrlInput = form.get("sourceUrl");
   const audio = form.get("audio");
   const thumbnail = form.get("thumbnail");
+  const rawPlaylistId = form.get("playlistId");
+  if (sourceUrlInput !== null && typeof sourceUrlInput !== "string") {
+    return jsonError("Source URL must be text", 400);
+  }
+  const id = crypto.randomUUID();
+  const sourceUrl = typeof sourceUrlInput === "string" && sourceUrlInput.trim()
+    ? sourceUrlInput.trim()
+    : `https://uploads.otium.invalid/${id}`;
   const parsed = SongSchema.safeParse({ title, sourceUrl });
   if (!parsed.success) return jsonError("A valid title and sourceUrl are required", 400);
   if (!(audio instanceof File)) return jsonError("An audio file is required", 400);
@@ -331,17 +420,32 @@ music.post("/songs/upload", async (c) => {
   if (thumbnail instanceof File && thumbnail.size > 10 * 1024 * 1024) return jsonError("Thumbnail exceeds the 10 MB limit", 413);
   if (thumbnail instanceof File && !thumbnail.type.startsWith("image/")) return jsonError("Thumbnail must have an image MIME type", 415);
 
+  let playlistId: string | null = null;
+  if (rawPlaylistId !== null) {
+    if (typeof rawPlaylistId !== "string" || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(rawPlaylistId)) {
+      return jsonError("Invalid playlist ID", 400);
+    }
+    playlistId = rawPlaylistId;
+    const playlist = await c.env.otium_db.prepare("SELECT id FROM playlist WHERE id = ?")
+      .bind(playlistId).first<{ id: string }>();
+    if (!playlist) return jsonError("Playlist not found", 404);
+    const count = await c.env.otium_db.prepare("SELECT COUNT(*) AS count FROM playlist_song WHERE playlist_id = ?")
+      .bind(playlistId).first<{ count: number }>();
+    if ((count?.count ?? 0) >= 49) return jsonError("A playlist can contain at most 49 songs", 409);
+  }
+
   const existing = await c.env.otium_db.prepare(
     "SELECT id FROM song WHERE source_url = ?",
   ).bind(parsed.data.sourceUrl).first<{ id: string }>();
   if (existing) return jsonError("A song with this source URL already exists", 409);
 
-  const id = crypto.randomUUID();
   const audioKey = `songs/${id}.${audio.type === "audio/mpeg" ? "mp3" : "audio"}`;
   const coverKey = thumbnail instanceof File ? `covers/${id}` : null;
   const config = b2Config(c.env);
   let audioUploaded = false;
   let coverUploaded = false;
+  let songInserted = false;
+  let playlistFull = false;
   try {
     await uploadObject(config, audioKey, audio, audio.type);
     audioUploaded = true;
@@ -352,14 +456,24 @@ music.post("/songs/upload", async (c) => {
     await c.env.otium_db.prepare(
       "INSERT INTO song (id, title, source_url, image_url, audio) VALUES (?, ?, ?, ?, ?)",
     ).bind(id, parsed.data.title, parsed.data.sourceUrl, coverKey, audioKey).run();
+    songInserted = true;
+    if (playlistId) {
+      const link = await ensurePlaylistSong(c.env.otium_db, playlistId, id);
+      if (link === "full") {
+        playlistFull = true;
+        throw new Error("playlist is full");
+      }
+    }
   } catch (error) {
+    if (songInserted) await c.env.otium_db.prepare("DELETE FROM song WHERE id = ?").bind(id).run().catch(() => {});
     if (coverUploaded && coverKey) await deleteObject(config, coverKey).catch(() => {});
     if (audioUploaded) await deleteObject(config, audioKey).catch(() => {});
+    if (playlistFull) return jsonError("A playlist can contain at most 49 songs", 409);
     console.error(JSON.stringify({ message: "song upload failed", error: error instanceof Error ? error.message : String(error) }));
     return jsonError("Could not save the song and its media", 502);
   }
 
-  return c.json({ id, title: parsed.data.title, sourceUrl: parsed.data.sourceUrl }, 201);
+  return c.json({ id, title: parsed.data.title, sourceUrl: parsed.data.sourceUrl, playlistId }, 201);
 });
 
 export default music;
