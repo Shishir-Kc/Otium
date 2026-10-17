@@ -1,9 +1,25 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import music from "./routes/music.ts"
+import type { OtiumBindings } from "./types/bindings.ts"
 
 
-const app = new Hono<{ Bindings: CloudflareBindings }>()
+const app = new Hono<{ Bindings: OtiumBindings }>()
+
+function isAllowedFrontendOrigin(origin: string, bindings: OtiumBindings) {
+  const configured = (bindings.FRONTEND_ORIGINS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (configured.includes(origin)) return true;
+  try {
+    const url = new URL(origin);
+    return (url.protocol === "http:" || url.protocol === "https:")
+      && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]");
+  } catch {
+    return false;
+  }
+}
 
 app.onError((error, c) => {
   console.error(JSON.stringify({
@@ -19,7 +35,8 @@ app.get('/', (c) => {
 })
 
 app.use("/music/*", cors({
-  origin: "*",
+  origin: (origin, c) => isAllowedFrontendOrigin(origin, c.env) ? origin : undefined,
+  credentials: true,
   allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
   allowHeaders: ["Content-Type", "Range", "If-Range"],
   exposeHeaders: ["Accept-Ranges", "Content-Range", "ETag"],
