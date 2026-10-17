@@ -5,7 +5,7 @@
 	"compatibility_date": "2026-10-14",
 	"vars": {
 		"DOWNLOAD_SERVER_URL": "http://127.0.0.1:3000/download",
-		"FRONTEND_ORIGINS": "https://justmusic.kc-dev-py.workers.dev,https://music-8vu.pages.dev,https://5d832d7f.music-8vu.pages.dev",
+		"FRONTEND_ORIGINS": "https://justmusic.kc-dev-py.workers.dev,https://music-8vu.pages.dev,https://5d832d7f.music-8vu.pages.dev,https://music.shishirkhatri.com.np",
 		"B2_REGION": "us-east-005",
 		"B2_BUCKET": "otium.bucket",
 		"B2_ENDPOINT": "https://s3.us-east-005.backblazeb2.com"
